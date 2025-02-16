@@ -2,16 +2,48 @@
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include <random>
 
 
 using namespace std;
 
 LRESULT CALLBACK WinProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-int N = 3;
-vector<vector<int>> stateMatrix(N, vector<int>(N, 0));
 
-// Путь к файлу
+// Глобальные переменные для взаимодействия с состоянием игры
+int N = 3;
+bool isSizeParamSet = false;
+vector<vector<int>> stateMatrix(N, vector<int>(N, 0));
+COLORREF markingColor = RGB(255, 0, 0);  // Изначальный цвет сетки (красный)
+int markingColorChangeSpeed = 5;  // Скорость изменения цвета
+COLORREF bgColor = RGB(51, 129, 255); // Начальный цвет фона
+HBRUSH bgBrush = CreateSolidBrush(bgColor);
 const char* saveFile = "state.txt";
+
+// Функция для изменения цвета плавно
+void ChangeGridColor(bool increase) {
+	// Извлекаем компоненты цвета
+	int r = GetRValue(markingColor);
+	int g = GetGValue(markingColor);
+	int b = GetBValue(markingColor);
+
+	// Изменяем компоненты цвета
+	if (increase) {
+		r = (r + markingColorChangeSpeed) % 256;
+	}
+	else {
+		r = (r - markingColorChangeSpeed + 256) % 256;
+	}
+
+	// Обновляем цвет
+	markingColor = RGB(r, g, b);
+}
+
+void SetRandomBgColor() {
+	static random_device rd;
+	static mt19937 gen(rd());
+	static uniform_int_distribution<int> dist(0, 255);
+	bgColor = RGB(dist(gen), dist(gen), dist(gen));
+}
 
 // Сохранение состояния
 void SaveState(HWND hwnd) {
@@ -19,7 +51,10 @@ void SaveState(HWND hwnd) {
 	if (!file) return;
 	RECT rect;
 	GetWindowRect(hwnd, &rect);
-	file << N << ' ' << (rect.right - rect.left) << ' ' << (rect.bottom - rect.top) << '\n';
+	file << N << '\n';
+	file << (rect.right - rect.left) << ' ' << (rect.bottom - rect.top) << '\n';
+	file << bgColor << '\n';
+	file << markingColor << '\n';
 	for (int i = 0; i < N; ++i) {
 		for (int j = 0; j < N; ++j) {
 			file << stateMatrix[i][j] << ' ';
@@ -33,12 +68,23 @@ void LoadState(HWND hwnd) {
 	ifstream file(saveFile);
 	if (!file) return;
 	int width = 320, height = 240; // Значения по умолчанию
-	file >> N >> width >> height;
-	stateMatrix.assign(N, vector<int>(N, 0)); // Обновляем матрицу
-	for (int i = 0; i < N; ++i)
-		for (int j = 0; j < N; ++j)
-			file >> stateMatrix[i][j];
+	int savedN;
+	file >> savedN;
+	file >> width >> height;
+	file >> bgColor;
+	file >> markingColor;
+	if (!isSizeParamSet || savedN == N) {
+		N = savedN;
+		stateMatrix.assign(N, vector<int>(N, 0)); // Обновляем матрицу
+		for (int i = 0; i < N; ++i)
+			for (int j = 0; j < N; ++j)
+				file >> stateMatrix[i][j];
+	}
+	DeleteObject(bgBrush);
+	bgBrush = CreateSolidBrush(bgColor);
+	SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
 	SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+	InvalidateRect(hwnd, NULL, TRUE);
 }
 
 void updateState(HWND hwnd, int x, int y, int type) {
@@ -68,6 +114,9 @@ void ClearState() {
 	for (int i = 0; i < N; ++i)
 		for (int j = 0; j < N; ++j)
 			stateMatrix[i][j] = 0;
+	markingColor = RGB(255, 0, 0);
+	DeleteObject(bgBrush);
+	bgBrush = CreateSolidBrush(RGB(51, 129, 255));
 }
 
 // Создание разметки для поля
@@ -81,7 +130,7 @@ void DrawMarking(HWND hwnd, HDC hdc) {
 	int cellWidth = width / N;
 	int cellHeight = height / N;
 
-	HPEN hPen = CreatePen(PS_SOLID, 2, RGB(255, 87, 87)); // Красные линии
+	HPEN hPen = CreatePen(PS_SOLID, 5, markingColor); // Красные линии
 	HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
 
 	// Вертикальные линии
@@ -150,6 +199,7 @@ void parseCmdParams(LPWSTR cmd) {
 	int newN;
 	if (wss >> newN && newN > 1 && newN < 21) { // Ограничение на размер
 		N = newN;
+		isSizeParamSet = true;
 	}
 	initState();
 }
@@ -162,8 +212,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int sh
 	wc.cbSize = sizeof(WNDCLASSEX);
 	wc.lpfnWndProc = WinProc;
 	wc.hInstance = hInstance;
-	wc.lpszClassName = L"MainColorClass";
-	wc.hbrBackground = CreateSolidBrush(RGB(51, 129, 255));
+	wc.lpszClassName = L"Tic-tac-toe";
+	wc.hbrBackground = bgBrush;
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 
 	if (!RegisterClassEx(&wc)) {
@@ -171,7 +221,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int sh
 	}
 
 	HWND hwnd = CreateWindowW(
-		L"MainColorClass",
+		L"Tic-tac-toe",
 		L"Tic-tac-toe",
 		WS_OVERLAPPEDWINDOW,
 		100, 100, 320, 240,
@@ -230,17 +280,44 @@ LRESULT CALLBACK WinProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		EndPaint(hwnd, &ps);
 		return 0;
 
-	case WM_KEYDOWN:
+	case WM_KEYDOWN: {
 		if (wParam == VK_ESCAPE || (wParam == 'Q' && GetKeyState(VK_CONTROL) < 0)) {
 			SaveState(hwnd);
 			PostQuitMessage(0); // Закрываем окно
 		}
-		if ((wParam == 'L') && (GetKeyState(VK_CONTROL) & 0x8000)) {
+		if ((wParam == 'L') && (GetKeyState(VK_CONTROL) < 0)) {
 			ClearState();
+			SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
 			InvalidateRect(hwnd, NULL, TRUE);
 		}
+		if ((wParam == 'C') && (GetKeyState(VK_SHIFT) < 0)) {
+			//system("notepad");
+			ShellExecute(NULL, L"open", L"state.txt", NULL, NULL, SW_SHOWNORMAL);
+		}
+		if (wParam == VK_RETURN) {
+			DeleteObject(bgBrush);
+			SetRandomBgColor();
+			bgBrush = CreateSolidBrush(bgColor); // Новый цвет фона
+			SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+			InvalidateRect(hwnd, NULL, TRUE); // Перерисовать окно
+		}
 		return 0;
+	}
+	case WM_MOUSEWHEEL: {
+		short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
 
+		// Если колесо мыши прокручено вверх, увеличиваем цвет
+		if (zDelta > 0) {
+			ChangeGridColor(true);
+		}
+		// Если колесо мыши прокручено вниз, уменьшаем цвет
+		else {
+			ChangeGridColor(false);
+		}
+
+		InvalidateRect(hwnd, NULL, TRUE);  // Запрашиваем перерисовку
+		return 0;
+	}
 	case WM_DESTROY:
 		SaveState(hwnd);
 		PostQuitMessage(0);
