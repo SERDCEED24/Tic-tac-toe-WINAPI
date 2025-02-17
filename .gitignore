@@ -361,3 +361,5 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/Tic-tac-toe-WINAPI/state.bin
+/Tic-tac-toe-WINAPI/state.txt
