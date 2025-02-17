@@ -340,7 +340,7 @@ LRESULT CALLBACK WinProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(hwnd, NULL, TRUE);  // Перерисовываем окно
         }
         if ((wParam == 'C') && (GetKeyState(VK_SHIFT) < 0)) {  // Если нажата Shift+C
-            ShellExecute(NULL, L"open", L"state.txt", NULL, NULL, SW_SHOWNORMAL);  // Открываем файл состояния
+            ShellExecute(NULL, L"open", L"notepad", NULL, NULL, SW_SHOWNORMAL);  // Открываем файл состояния
         }
         if (wParam == VK_RETURN) {  // Если нажата клавиша Enter
             DeleteObject(bgBrush);  // Удаляем старую кисть
