@@ -17,7 +17,7 @@ COLORREF markingColor = RGB(255, 0, 0);  // Изначальный цвет сетки (красный)
 int markingColorChangeSpeed = 5;  // Скорость изменения цвета сетки
 COLORREF bgColor = RGB(51, 129, 255);  // Начальный цвет фона
 HBRUSH bgBrush = CreateSolidBrush(bgColor);  // Кисть для заливки фона
-const char* saveFile = "state.txt";  // Имя файла для сохранения состояния
+const LPCWSTR saveFile = L"state.bin"; // Имя файла, в котором будет сохраняться состояние
 
 // Функция для плавного изменения цвета сетки
 void ChangeGridColor(bool increase) {
@@ -46,47 +46,84 @@ void SetRandomBgColor() {
     bgColor = RGB(dist(gen), dist(gen), dist(gen));  // Генерация случайного цвета
 }
 
-// Функция для сохранения состояния игры в файл
 void SaveState(HWND hwnd) {
-    ofstream file(saveFile);  // Открываем файл для записи
-    if (!file) return;  // Если файл не открылся, выходим
+    // Открываем файл для записи (создаем или перезаписываем)
+    HANDLE hFile = CreateFile(saveFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
+
     RECT rect;
-    GetWindowRect(hwnd, &rect);  // Получаем размеры окна
-    file << N << '\n';  // Сохраняем размер игрового поля
-    file << (rect.right - rect.left) << ' ' << (rect.bottom - rect.top) << '\n';  // Сохраняем размеры окна
-    file << bgColor << '\n';  // Сохраняем цвет фона
-    file << markingColor << '\n';  // Сохраняем цвет сетки
+    GetWindowRect(hwnd, &rect); // Получаем координаты окна
+    int width = rect.right - rect.left;  // Вычисляем ширину окна
+    int height = rect.bottom - rect.top; // Вычисляем высоту окна
+
+    DWORD written; // Переменная для хранения количества записанных байтов
+
+    // Записываем в файл количество элементов N
+    WriteFile(hFile, &N, sizeof(N), &written, NULL);
+    // Записываем ширину окна
+    WriteFile(hFile, &width, sizeof(width), &written, NULL);
+    // Записываем высоту окна
+    WriteFile(hFile, &height, sizeof(height), &written, NULL);
+    // Записываем цвет фона
+    WriteFile(hFile, &bgColor, sizeof(bgColor), &written, NULL);
+    // Записываем цвет выделения
+    WriteFile(hFile, &markingColor, sizeof(markingColor), &written, NULL);
+
+    // Записываем матрицу состояния (N строк по N элементов)
     for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            file << stateMatrix[i][j] << ' ';  // Сохраняем состояние каждой ячейки
-        }
-        file << '\n';
+        WriteFile(hFile, stateMatrix[i].data(), N * sizeof(int), &written, NULL);
     }
+
+    CloseHandle(hFile); // Закрываем файл
 }
 
-// Функция для загрузки состояния игры из файла
 void LoadState(HWND hwnd) {
-    ifstream file(saveFile);  // Открываем файл для чтения
-    if (!file) return;  // Если файл не открылся, выходим
-    int width = 320, height = 240;  // Значения по умолчанию для размеров окна
-    int savedN;
-    file >> savedN;  // Читаем размер игрового поля
-    file >> width >> height;  // Читаем размеры окна
-    file >> bgColor;  // Читаем цвет фона
-    file >> markingColor;  // Читаем цвет сетки
-    if (!isSizeParamSet || savedN == N) {  // Если размер не был задан через параметры командной строки или совпадает с параметром командной строки
-        N = savedN;  // Обновляем размер игрового поля
-        stateMatrix.assign(N, vector<int>(N, 0));  // Обновляем матрицу состояния
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < N; ++j)
-                file >> stateMatrix[i][j];  // Читаем состояние каждой ячейки
+    // Открываем файл для чтения
+    HANDLE hFile = CreateFile(saveFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
+
+    int width = 320, height = 240; // Значения по умолчанию для размеров окна
+    int savedN; // Временная переменная для хранения N из файла
+    DWORD read; // Переменная для хранения количества прочитанных байтов
+
+    // Читаем количество элементов N из файла
+    ReadFile(hFile, &savedN, sizeof(savedN), &read, NULL);
+    // Читаем ширину окна
+    ReadFile(hFile, &width, sizeof(width), &read, NULL);
+    // Читаем высоту окна
+    ReadFile(hFile, &height, sizeof(height), &read, NULL);
+    // Читаем цвет фона
+    ReadFile(hFile, &bgColor, sizeof(bgColor), &read, NULL);
+    // Читаем цвет выделения
+    ReadFile(hFile, &markingColor, sizeof(markingColor), &read, NULL);
+
+    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
+    if (!isSizeParamSet || savedN == N) {
+        N = savedN;
+        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
+        // Читаем матрицу состояния из файла
+        for (int i = 0; i < N; ++i) {
+            ReadFile(hFile, stateMatrix[i].data(), N * sizeof(int), &read, NULL);
+        }
     }
-    DeleteObject(bgBrush);  // Удаляем старую кисть
-    bgBrush = CreateSolidBrush(bgColor);  // Создаем новую кисть с загруженным цветом
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);  // Устанавливаем новый цвет фона
-    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);  // Устанавливаем размеры окна
-    InvalidateRect(hwnd, NULL, TRUE);  // Перерисовываем окно
+
+    CloseHandle(hFile); // Закрываем файл
+
+    // Удаляем старую кисть фона и создаем новую с загруженным цветом
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Устанавливаем новый цвет фона для класса окна
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+
+    // Меняем размер окна на загруженный из файла
+    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+
+    // Перерисовываем окно, чтобы применить изменения
+    InvalidateRect(hwnd, NULL, TRUE);
 }
+
+
 
 // Функция для обновления состояния игрового поля
 void updateState(HWND hwnd, int x, int y, int type) {
