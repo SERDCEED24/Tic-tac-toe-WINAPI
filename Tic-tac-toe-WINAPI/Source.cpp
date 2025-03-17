@@ -1,6 +1,9 @@
 #include <windows.h>  // Подключение библиотеки Windows API для работы с окнами
 #include <vector>     // Подключение библиотеки для работы с векторами
 #include <random>     // Подключение библиотеки для генерации случайных чисел
+#include <cstdio>     // Подключение библиотеки для работы с файловыми указателями
+#include <fstream>    // Подключение библиотеки для работы с потоками ввода/вывода
+#include <string>     // Подключение библиотеки для работы со строками
 
 using namespace std;  // Использование стандартного пространства имен
 
@@ -16,6 +19,8 @@ int markingColorChangeSpeed = 5;  // Скорость изменения цвета сетки
 COLORREF bgColor = RGB(51, 129, 255);  // Начальный цвет фона
 HBRUSH bgBrush = CreateSolidBrush(bgColor);  // Кисть для заливки фона
 const LPCWSTR saveFile = L"state.bin"; // Имя файла, в котором будет сохраняться состояние
+int saveMethod = 3; // Метод сохранения состояния
+int loadMethod = 3; // Метод загрузки состояния
 
 // Функция для плавного изменения цвета сетки
 void ChangeGridColor(bool increase) {
@@ -44,7 +49,266 @@ void SetRandomBgColor() {
     bgColor = RGB(dist(gen), dist(gen), dist(gen));  // Генерация случайного цвета
 }
 
-void SaveState(HWND hwnd) {
+void SaveStateMemoryMappedFiles(HWND hwnd) {
+    // Создаем или перезаписываем файл
+    HANDLE hFile = CreateFile(saveFile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    RECT rect;
+    GetWindowRect(hwnd, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+
+    // Размер данных для сохранения
+    size_t dataSize = sizeof(N) + sizeof(width) + sizeof(height) + sizeof(bgColor) + sizeof(markingColor) + (N * N * sizeof(int));
+
+    // Устанавливаем размер файла
+    SetFilePointer(hFile, dataSize, NULL, FILE_BEGIN);
+    SetEndOfFile(hFile);
+
+    // Создаем отображение файла
+    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READWRITE, 0, dataSize, NULL);
+    if (!hMap) {
+        CloseHandle(hFile);
+        return;
+    }
+    // Отображаем файл в память
+    char* pData = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, dataSize);
+    if (!pData) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return;
+    }
+    // Записываем данные в отображенную память
+    size_t offset = 0;
+    memcpy(pData + offset, &N, sizeof(N));
+    offset += sizeof(N);
+    memcpy(pData + offset, &width, sizeof(width));
+    offset += sizeof(width);
+    memcpy(pData + offset, &height, sizeof(height));
+    offset += sizeof(height);
+    memcpy(pData + offset, &bgColor, sizeof(bgColor));
+    offset += sizeof(bgColor);
+    memcpy(pData + offset, &markingColor, sizeof(markingColor));
+    offset += sizeof(markingColor);
+    for (int i = 0; i < N; ++i) {
+        memcpy(pData + offset, stateMatrix[i].data(), N * sizeof(int));
+        offset += N * sizeof(int);
+    }
+    // Освобождаем ресурсы
+    UnmapViewOfFile(pData);
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+}
+
+void LoadStateMemoryMappedFiles(HWND hwnd) {
+    // Открываем файл для чтения
+    HANDLE hFile = CreateFile(saveFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+    // Создаем отображение файла
+    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMap) {
+        CloseHandle(hFile);
+        return;
+    }
+    // Отображаем файл в память
+    char* pData = (char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!pData) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return;
+    }
+    // Читаем данные из отображенной памяти
+    size_t offset = 0;
+    int savedN;
+    memcpy(&savedN, pData + offset, sizeof(savedN));
+    offset += sizeof(savedN);
+    int width = 320, height = 240; // Значения по умолчанию
+    memcpy(&width, pData + offset, sizeof(width));
+    offset += sizeof(width);
+    memcpy(&height, pData + offset, sizeof(height));
+    offset += sizeof(height);
+    memcpy(&bgColor, pData + offset, sizeof(bgColor));
+    offset += sizeof(bgColor);
+    memcpy(&markingColor, pData + offset, sizeof(markingColor));
+    offset += sizeof(markingColor);
+    // Если размер матрицы совпадает или не установлен вручную, загружаем ее
+    if (!isSizeParamSet || savedN == N) {
+        N = savedN;
+        stateMatrix.assign(N, std::vector<int>(N, 0));
+
+        for (int i = 0; i < N; ++i) {
+            memcpy(stateMatrix[i].data(), pData + offset, N * sizeof(int));
+            offset += N * sizeof(int);
+        }
+    }
+    // Освобождаем ресурсы
+    UnmapViewOfFile(pData);
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    // Удаляем старую кисть фона и создаем новую
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+    // Устанавливаем новый цвет фона
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+    // Меняем размер окна
+    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    // Перерисовываем окно
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
+void SaveStateFilePointers(HWND hwnd) {
+    // Создаём файловый указатель
+    FILE* file;
+    fopen_s(&file, "state.bin", "wb"); // Открываем файл для записи, прикрепляя к нему созданный ранее указатель
+
+    if (!file) return; // Если возникает какая-то ошибка при открытии, функция завершается
+
+    RECT rect;
+    GetWindowRect(hwnd, &rect); // Получаем координаты окна
+    int width = rect.right - rect.left;  // Вычисляем ширину окна
+    int height = rect.bottom - rect.top; // Вычисляем высоту окна
+
+    // Записываем в файл количество элементов N
+    fwrite(&N, sizeof(N), 1, file);
+    // Записываем ширину окна
+    fwrite(&width, sizeof(width), 1, file);
+    // Записываем высоту окна
+    fwrite(&height, sizeof(height), 1, file);
+    // Записываем цвет фона
+    fwrite(&bgColor, sizeof(bgColor), 1, file);
+    // Записываем цвет выделения
+    fwrite(&markingColor, sizeof(markingColor), 1, file);
+
+    // Записываем матрицу состояния (N строк по N элементов)
+    for (int i = 0; i < N; ++i) {
+        fwrite(stateMatrix[i].data(), N * sizeof(int), 1, file);
+    }
+
+    fclose(file); // Закрываем файл
+}
+
+void LoadStateFilePointers(HWND hwnd) {
+    // Создаём файловый указатель
+    FILE* file;
+    fopen_s(&file, "state.bin", "rb"); // Открываем файл для чтения, прикрепляя к нему созданный ранее указатель
+    if (!file) return; // Если возникает какая-то ошибка, функция завершается
+
+    int width = 320, height = 240; // Значения по умолчанию для размеров окна
+    int savedN; // Временная переменная для хранения N из файла
+
+    // Читаем количество элементов N из файла
+    fread(&savedN, sizeof(savedN), 1, file);
+    // Читаем ширину окна
+    fread(&width, sizeof(width), 1, file);
+    // Читаем высоту окна
+    fread(&height, sizeof(height), 1, file);
+    // Читаем цвет фона
+    fread(&bgColor, sizeof(bgColor), 1, file);
+    // Читаем цвет выделения
+    fread(&markingColor, sizeof(markingColor), 1, file);
+
+    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
+    if (!isSizeParamSet || savedN == N) {
+        N = savedN;
+        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
+        // Читаем матрицу состояния из файла
+        for (int i = 0; i < N; ++i) {
+            fread(stateMatrix[i].data(), N * sizeof(int), 1, file);
+        }
+    }
+
+    fclose(file); // Закрываем файл
+
+    // Удаляем старую кисть фона и создаем новую с загруженным цветом
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Устанавливаем новый цвет фона для класса окна
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+
+    // Меняем размер окна на загруженный из файла
+    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+
+    // Перерисовываем окно, чтобы применить изменения
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
+void SaveStateFileStreams(HWND hwnd) {
+    // Открываем поток ввода для файла состояния
+    ofstream file("state.bin", ios::binary);
+    if (!file) return; // Если возникает какая-то ошибка, функция завершается
+
+    RECT rect;
+    GetWindowRect(hwnd, &rect); // Получаем координаты окна
+    int width = rect.right - rect.left;  // Вычисляем ширину окна
+    int height = rect.bottom - rect.top; // Вычисляем высоту окна
+
+    // Записываем в файл количество элементов N
+    file.write(reinterpret_cast<char*>(&N), sizeof(N));
+    // Записываем ширину окна
+    file.write(reinterpret_cast<char*>(&width), sizeof(width));
+    // Записываем высоту окна
+    file.write(reinterpret_cast<char*>(&height), sizeof(height));
+    // Записываем цвет фона
+    file.write(reinterpret_cast<char*>(&bgColor), sizeof(bgColor));
+    // Записываем цвет выделения
+    file.write(reinterpret_cast<char*>(&markingColor), sizeof(markingColor));
+
+    // Записываем матрицу состояния (N строк по N элементов)
+    for (int i = 0; i < N; ++i) {
+        file.write(reinterpret_cast<char*>(stateMatrix[i].data()), N * sizeof(int));
+    }
+
+    file.close(); // Закрываем поток ввода для файла состояния
+}
+
+void LoadStateFileStreams(HWND hwnd) {
+    // Открываем поток вывода для файла состояния
+    ifstream file("state.bin", ios::binary);
+    if (!file) return; // Если возникает какая-то ошибка, функция завершается
+
+    int width = 320, height = 240; // Значения по умолчанию для размеров окна
+    int savedN; // Временная переменная для хранения N из файла
+
+    // Читаем количество элементов N из файла
+    file.read(reinterpret_cast<char*>(&savedN), sizeof(savedN)); 
+    // Читаем ширину окна
+    file.read(reinterpret_cast<char*>(&width), sizeof(width));
+    // Читаем высоту окна
+    file.read(reinterpret_cast<char*>(&height), sizeof(height));
+    // Читаем цвет фона
+    file.read(reinterpret_cast<char*>(&bgColor), sizeof(bgColor));
+    // Читаем цвет выделения
+    file.read(reinterpret_cast<char*>(&markingColor), sizeof(markingColor));
+
+    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
+    if (!isSizeParamSet || savedN == N) {
+        N = savedN;
+        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
+        // Читаем матрицу состояния из файла
+        for (int i = 0; i < N; ++i) {
+            file.read(reinterpret_cast<char*>(stateMatrix[i].data()), N * sizeof(int));
+        }
+    }
+
+    file.close(); // Закрываем поток вывода для файла состояния
+
+    // Удаляем старую кисть фона и создаем новую с загруженным цветом
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Устанавливаем новый цвет фона для класса окна
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+
+    // Меняем размер окна на загруженный из файла
+    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+
+    // Перерисовываем окно, чтобы применить изменения
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
+void SaveStateWinAPI(HWND hwnd) {
     // Открываем файл для записи (создаем или перезаписываем)
     HANDLE hFile = CreateFile(saveFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
@@ -75,7 +339,7 @@ void SaveState(HWND hwnd) {
     CloseHandle(hFile); // Закрываем файл
 }
 
-void LoadState(HWND hwnd) {
+void LoadStateWinAPI(HWND hwnd) {
     // Открываем файл для чтения
     HANDLE hFile = CreateFile(saveFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
@@ -119,6 +383,48 @@ void LoadState(HWND hwnd) {
 
     // Перерисовываем окно, чтобы применить изменения
     InvalidateRect(hwnd, NULL, TRUE);
+}
+
+void SaveState(HWND hwnd) {
+    wstring methodNames[4] = { L"отображения файлов на память", L"указателей на файлы", L"потоков ввода-вывода", L"файловых функций WinAPI"}; // Массив названий методов для вывода сообщения на экран
+    switch (saveMethod) // Запуск метода соответствующего выбранному с помощью saveMethod
+    {
+    case 0:
+        SaveStateMemoryMappedFiles(hwnd);
+        break;
+    case 1:
+        SaveStateFilePointers(hwnd);
+        break;
+    case 2:
+        SaveStateFileStreams(hwnd);
+        break;
+    case 3:
+        SaveStateWinAPI(hwnd);
+        break;
+    }
+    wstring msg = wstring(L"Состояние сохранено методом ") + methodNames[saveMethod];  // Создание финальной строки сообщения для вывода на экран
+    MessageBox(hwnd, msg.c_str(), L"Сохранение состояния", MB_OK | MB_ICONINFORMATION); // Вывод на экран окна с уведомлением о сохранении и названием метода
+}
+
+void LoadState(HWND hwnd) {
+    wstring methodNames[4] = { L"отображения файлов на память", L"указателей на файлы", L"потоков ввода-вывода", L"файловых функций WinAPI" }; // Массив названий методов для вывода сообщения на экран
+    switch (loadMethod) // Запуск метода соответствующего выбранному с помощью loadMethod
+    {
+    case 0:
+        LoadStateMemoryMappedFiles(hwnd);
+        break;
+    case 1:
+        LoadStateFilePointers(hwnd);
+        break;
+    case 2:
+        LoadStateFileStreams(hwnd);
+        break;
+    case 3:
+        LoadStateWinAPI(hwnd);
+        break;
+    }
+    wstring msg = wstring(L"Состояние загружено методом ") + methodNames[loadMethod]; // Создание финальной строки сообщения для вывода на экран
+    MessageBox(hwnd, msg.c_str(), L"Загрузка состояния", MB_OK | MB_ICONINFORMATION); // Вывод на экран окна с уведомлением о загрузке и названием метода
 }
 
 
@@ -245,6 +551,14 @@ void parseCmdParams(LPWSTR cmd) {
         if (newN > 1 && newN < 21) {  // Проверяем корректность размера
             N = newN;  // Обновляем размер игрового поля
             isSizeParamSet = true;  // Устанавливаем флаг
+        }
+        if (argc >= 2) { // Если пользователь ввёл больше одного агрумента, то надо выбрать метод сохранения состояния в соответствии с введённым значением
+            int sM = _wtoi(argv[2]); // Конвертация в число
+            saveMethod = (0 <= sM &&  sM <= 3) ? sM : 3; // Устанавливаем новое значение
+        }
+        if (argc >= 3) { // Если пользователь ввёл больше двух агрументов, то надо выбрать метод загрузки состояния в соответствии с введённым значением
+            int lM = _wtoi(argv[3]); // Конвертация в число
+            loadMethod = (0 <= lM && lM <= 3) ? lM : 3; // Устанавливаем новое значение
         }
     }
 
