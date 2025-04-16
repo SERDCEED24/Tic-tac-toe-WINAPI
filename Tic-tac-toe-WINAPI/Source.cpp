@@ -51,7 +51,15 @@ void SetRandomBgColor() {
 
 void SaveStateMemoryMappedFiles(HWND hwnd) {
     // Создаем или перезаписываем файл
-    HANDLE hFile = CreateFile(saveFile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFile(
+        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
+        GENERIC_READ | GENERIC_WRITE, // [DWORD dwDesiredAccess] — запрашиваемые права: чтение и запись
+        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
+        CREATE_ALWAYS,         // [DWORD dwCreationDisposition] — всегда создавать новый файл, даже если он уже есть (перезапишет)
+        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
+        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
+    );
     if (hFile == INVALID_HANDLE_VALUE) return;
 
     RECT rect;
@@ -63,17 +71,39 @@ void SaveStateMemoryMappedFiles(HWND hwnd) {
     size_t dataSize = sizeof(N) + sizeof(width) + sizeof(height) + sizeof(bgColor) + sizeof(markingColor) + (N * N * sizeof(int));
 
     // Устанавливаем размер файла
-    SetFilePointer(hFile, dataSize, NULL, FILE_BEGIN);
-    SetEndOfFile(hFile);
+    SetFilePointer(
+        hFile,                 // [HANDLE hFile] — дескриптор файла
+        dataSize,              // [LONG lDistanceToMove] — на сколько байт сместить указатель файла
+        NULL,                  // [PLONG lpDistanceToMoveHigh] — NULL, т.к. используем только младшие 32 бита
+        FILE_BEGIN             // [DWORD dwMoveMethod] — сдвиг от начала файла
+    );
+
+    SetEndOfFile(hFile);       // Обрезает или расширяет файл до текущего указателя — тут мы заранее задали размер файла через SetFilePointer
 
     // Создаем отображение файла
-    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READWRITE, 0, dataSize, NULL);
+    HANDLE hMap = CreateFileMapping(
+        hFile,                 // [HANDLE hFile] — дескриптор файла, с которым будет связано отображение
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpFileMappingAttributes] — NULL, отображение не наследуется
+        PAGE_READWRITE,        // [DWORD flProtect] — защита: доступ на чтение и запись
+        0,                     // [DWORD dwMaximumSizeHigh] — старшие 32 бита размера (если нужен файл > 4ГБ)
+        dataSize,              // [DWORD dwMaximumSizeLow] — младшие 32 бита размера отображения
+        NULL                   // [LPCTSTR lpName] — NULL, имя отображения не нужно (анонимное)
+    );
+
     if (!hMap) {
         CloseHandle(hFile);
         return;
     }
+
     // Отображаем файл в память
-    char* pData = (char*)MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, dataSize);
+    char* pData = (char*)MapViewOfFile(
+        hMap,                  // [HANDLE hFileMappingObject] — дескриптор отображения, созданного через CreateFileMapping
+        FILE_MAP_WRITE,        // [DWORD dwDesiredAccess] — доступ на запись
+        0,                     // [DWORD dwFileOffsetHigh] — старшие 32 бита смещения (если нужно начать не с начала)
+        0,                     // [DWORD dwFileOffsetLow] — младшие 32 бита смещения (0 = с начала файла)
+        dataSize               // [SIZE_T dwNumberOfBytesToMap] — размер отображения, сколько байт из файла отобразить в память
+    );
+
     if (!pData) {
         CloseHandle(hMap);
         CloseHandle(hFile);
@@ -103,16 +133,39 @@ void SaveStateMemoryMappedFiles(HWND hwnd) {
 
 void LoadStateMemoryMappedFiles(HWND hwnd) {
     // Открываем файл для чтения
-    HANDLE hFile = CreateFile(saveFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFile(
+        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
+        GENERIC_READ,          // [DWORD dwDesiredAccess] — запрашиваемые права: чтение
+        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
+        OPEN_ALWAYS,           // [DWORD dwCreationDisposition] — открывать файл если он есть, если нет - создать
+        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
+        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
+    );
     if (hFile == INVALID_HANDLE_VALUE) return;
     // Создаем отображение файла
-    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    HANDLE hMap = CreateFileMapping(
+        hFile,                 // [HANDLE hFile] — дескриптор файла, с которым будет связано отображение
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpFileMappingAttributes] — NULL, отображение не наследуется
+        PAGE_READONLY,         // [DWORD flProtect] — защита: доступ на чтение и запись
+        0,                     // [DWORD dwMaximumSizeHigh] — старшие 32 бита размера (если нужен файл > 4ГБ)
+        0,                     // [DWORD dwMaximumSizeLow] — младшие 32 бита размера отображения
+        NULL                   // [LPCTSTR lpName] — NULL, имя отображения не нужно (анонимное)
+    );
+
     if (!hMap) {
         CloseHandle(hFile);
         return;
     }
     // Отображаем файл в память
-    char* pData = (char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    char* pData = (char*)MapViewOfFile(
+        hMap,                  // [HANDLE hFileMappingObject] — дескриптор отображения, созданного через CreateFileMapping
+        FILE_MAP_READ,         // [DWORD dwDesiredAccess] — доступ на запись
+        0,                     // [DWORD dwFileOffsetHigh] — старшие 32 бита смещения (если нужно начать не с начала)
+        0,                     // [DWORD dwFileOffsetLow] — младшие 32 бита смещения (0 = с начала файла)
+        0                      // [SIZE_T dwNumberOfBytesToMap] — размер отображения, сколько байт из файла отобразить в память
+    );
+
     if (!pData) {
         CloseHandle(hMap);
         CloseHandle(hFile);
@@ -150,11 +203,27 @@ void LoadStateMemoryMappedFiles(HWND hwnd) {
     DeleteObject(bgBrush);
     bgBrush = CreateSolidBrush(bgColor);
     // Устанавливаем новый цвет фона
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+    SetClassLongPtr(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
+        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
+    );
+
     // Меняем размер окна
-    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    SetWindowPos(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
+        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
+        width, height,        // [int cx, int cy] — новая ширина и высота
+        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
+    );
+
     // Перерисовываем окно
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(
+        hwnd,      // [HWND hWnd] — дескриптор окна
+        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
+        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
+    );
 }
 
 void SaveStateFilePointers(HWND hwnd) {
@@ -225,13 +294,27 @@ void LoadStateFilePointers(HWND hwnd) {
     bgBrush = CreateSolidBrush(bgColor);
 
     // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+    SetClassLongPtr(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
+        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
+    );
 
     // Меняем размер окна на загруженный из файла
-    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    SetWindowPos(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
+        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
+        width, height,        // [int cx, int cy] — новая ширина и высота
+        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
+    );
 
     // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(
+        hwnd,      // [HWND hWnd] — дескриптор окна
+        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
+        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
+    );
 }
 
 void SaveStateFileStreams(HWND hwnd) {
@@ -299,18 +382,41 @@ void LoadStateFileStreams(HWND hwnd) {
     bgBrush = CreateSolidBrush(bgColor);
 
     // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+    SetClassLongPtr(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
+        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
+    );
 
     // Меняем размер окна на загруженный из файла
-    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    SetWindowPos(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
+        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
+        width, height,        // [int cx, int cy] — новая ширина и высота
+        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
+    );
 
     // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(
+        hwnd,      // [HWND hWnd] — дескриптор окна
+        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
+        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
+    );
+
 }
 
 void SaveStateWinAPI(HWND hwnd) {
     // Открываем файл для записи (создаем или перезаписываем)
-    HANDLE hFile = CreateFile(saveFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFile(
+        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
+        GENERIC_WRITE,         // [DWORD dwDesiredAccess] — запрашиваемые права: запись
+        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
+        CREATE_ALWAYS,         // [DWORD dwCreationDisposition] — всегда создавать новый файл, даже если он уже есть (перезапишет)
+        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
+        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
+    );
     if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
 
     RECT rect;
@@ -341,7 +447,15 @@ void SaveStateWinAPI(HWND hwnd) {
 
 void LoadStateWinAPI(HWND hwnd) {
     // Открываем файл для чтения
-    HANDLE hFile = CreateFile(saveFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFile(
+        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
+        GENERIC_READ,          // [DWORD dwDesiredAccess] — запрашиваемые права: чтение
+        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
+        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
+        OPEN_ALWAYS,           // [DWORD dwCreationDisposition] — открывать файл если он есть, если нет - создать
+        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
+        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
+    );
     if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
 
     int width = 320, height = 240; // Значения по умолчанию для размеров окна
@@ -376,13 +490,29 @@ void LoadStateWinAPI(HWND hwnd) {
     bgBrush = CreateSolidBrush(bgColor);
 
     // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+    SetClassLongPtr(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
+        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
+    );
 
     // Меняем размер окна на загруженный из файла
-    SetWindowPos(hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    SetWindowPos(
+        hwnd,                 // [HWND hWnd] — дескриптор окна
+        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
+        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
+        width, height,        // [int cx, int cy] — новая ширина и высота
+        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
+    );
+
 
     // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(
+        hwnd,      // [HWND hWnd] — дескриптор окна
+        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
+        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
+    );
+
 }
 
 void SaveState(HWND hwnd) {
