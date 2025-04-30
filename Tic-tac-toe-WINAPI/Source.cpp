@@ -6,6 +6,8 @@
 #include <string>     // Подключение библиотеки для работы со строками
 #include <iostream>   // Подключение библиотеки для ввода/вывода
 
+#pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup")
+
 using namespace std;  // Использование стандартного пространства имен
 
 // Объявление функции обработки сообщений окна
@@ -240,9 +242,10 @@ void SaveConfig(int n) {
 // Функция для загрузки конфигурации (размера поля) из файла
 void LoadConfig(HWND hwnd) {
     // Открываем файл конфигурации для чтения
-    HANDLE hFile = CreateFileW(configFile, GENERIC_READ, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFileW(configFile, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
-        MessageBox(NULL, L"Ошибка открытия файла конфигурации", L"Ошибка", MB_OK | MB_ICONERROR);
+        N = 3;
+        SaveConfig(N);  // Создаём файл с настройками по умолчанию
         return;
     }
 
