@@ -4,816 +4,566 @@
 #include <cstdio>     // Подключение библиотеки для работы с файловыми указателями
 #include <fstream>    // Подключение библиотеки для работы с потоками ввода/вывода
 #include <string>     // Подключение библиотеки для работы со строками
+#include <iostream>   // Подключение библиотеки для ввода/вывода
 
 using namespace std;  // Использование стандартного пространства имен
 
 // Объявление функции обработки сообщений окна
 LRESULT CALLBACK WinProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-// Глобальные переменные для взаимодействия с состоянием игры
-int N = 3;  // Размер игрового поля (по умолчанию 3x3)
-bool isSizeParamSet = false;  // Флаг, указывающий, был ли задан размер через параметры командной строки
-vector<vector<int>> stateMatrix(N, vector<int>(N, 0));  // Матрица состояния игрового поля
-COLORREF markingColor = RGB(255, 0, 0);  // Изначальный цвет сетки (красный)
-int markingColorChangeSpeed = 5;  // Скорость изменения цвета сетки
-COLORREF bgColor = RGB(51, 129, 255);  // Начальный цвет фона
-HBRUSH bgBrush = CreateSolidBrush(bgColor);  // Кисть для заливки фона
-const LPCWSTR saveFile = L"state.bin"; // Имя файла, в котором будет сохраняться состояние
-int saveMethod = 3; // Метод сохранения состояния
-int loadMethod = 3; // Метод загрузки состояния
+// Глобальные переменные
+int N = 3; // Размер игрового поля (по умолчанию 3x3)
+bool isSizeParamSet = false; // Флаг, указывающий, был ли задан размер через параметры
+vector<vector<int>> stateMatrix; // Локальная копия матрицы состояния
+COLORREF markingColor = RGB(255, 0, 0); // Изначальный цвет сетки
+int markingColorChangeSpeed = 5; // Скорость изменения цвета сетки
+COLORREF bgColor = RGB(51, 129, 255); // Начальный цвет фона
+HBRUSH bgBrush = CreateSolidBrush(bgColor); // Кисть для фона
+const LPCWSTR configFile = L"config.bin"; // Имя конфигурационного файла
+
+// Новые переменные для работы с разделяемой памятью
+HANDLE hMapFile = NULL; // Дескриптор отображения файла (используется для разделяемой памяти)
+LPVOID pSharedMem = NULL; // Указатель на область разделяемой памяти
+HANDLE hMutex = NULL; // Мьютекс для синхронизации доступа к разделяемой памяти
+
+// Определение пользовательских сообщений для межпроцессного взаимодействия
+UINT WM_UPDATE_GAME_STATE = 0; // Сообщение для обновления состояния игры
+UINT WM_UPDATE_COLORS = 0; // Сообщение для обновления цветов
+
+// Структура для хранения данных в разделяемой памяти
+struct SharedGameState {
+    int N; // Размер игрового поля
+    COLORREF bgColor; // Цвет фона
+    COLORREF markingColor; // Цвет сетки
+    int matrix[400]; // Плоский массив для матрицы состояния (максимум 20x20 = 400 элементов)
+};
+
+// Функция для инициализации разделяемой памяти
+void InitSharedMemory() {
+    // Создаем мьютекс для синхронизации доступа к разделяемой памяти
+    hMutex = CreateMutex(NULL, FALSE, L"TicTacToeMutex");
+    if (hMutex == NULL) {
+        MessageBox(NULL, L"Ошибка создания мьютекса", L"Ошибка", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Создаем или открываем отображение файла в память
+    hMapFile = CreateFileMapping(
+        INVALID_HANDLE_VALUE, // Используем страничный файл (анонимное отображение)
+        NULL, // Атрибуты безопасности по умолчанию
+        PAGE_READWRITE, // Доступ на чтение и запись
+        0, sizeof(SharedGameState), // Размер выделяемой памяти
+        L"TicTacToeSharedMemory" // Имя объекта разделяемой памяти
+    );
+
+    if (hMapFile == NULL) {
+        MessageBox(NULL, L"Ошибка создания разделяемой памяти", L"Ошибка", MB_OK | MB_ICONERROR);
+        CloseHandle(hMutex);
+        return;
+    }
+
+    // Отображаем разделяемую память в адресное пространство процесса
+    pSharedMem = MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedGameState));
+    if (pSharedMem == NULL) {
+        MessageBox(NULL, L"Ошибка отображения памяти", L"Ошибка", MB_OK | MB_ICONERROR);
+        CloseHandle(hMapFile);
+        CloseHandle(hMutex);
+        return;
+    }
+
+    // Получаем указатель на структуру в разделяемой памяти
+    SharedGameState* sharedState = (SharedGameState*)pSharedMem;
+
+    // Захватываем мьютекс перед доступом к разделяемой памяти
+    WaitForSingleObject(hMutex, INFINITE);
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // Если память уже существует, загружаем данные из нее
+        N = sharedState->N;
+        bgColor = sharedState->bgColor;
+        markingColor = sharedState->markingColor;
+
+        // Инициализируем локальную матрицу состояния
+        stateMatrix.assign(N, vector<int>(N, 0));
+
+        // Копируем данные из плоского массива в матрицу
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                stateMatrix[i][j] = sharedState->matrix[i * N + j];
+    }
+    else {
+        // Инициализируем новую разделяемую память
+        sharedState->N = N;
+        sharedState->bgColor = bgColor;
+        sharedState->markingColor = markingColor;
+
+        // Инициализируем локальную матрицу состояния
+        stateMatrix.assign(N, vector<int>(N, 0));
+
+        // Инициализируем плоский массив в разделяемой памяти
+        for (int i = 0; i < N * N; ++i)
+            sharedState->matrix[i] = 0;
+    }
+
+    // Освобождаем мьютекс
+    ReleaseMutex(hMutex);
+}
+
+// Функция для обновления разделяемой памяти
+void UpdateSharedMemory() {
+    if (!pSharedMem) return; // Проверяем, что память инициализирована
+
+    // Получаем указатель на структуру в разделяемой памяти
+    SharedGameState* sharedState = (SharedGameState*)pSharedMem;
+
+    // Захватываем мьютекс перед изменением данных
+    WaitForSingleObject(hMutex, INFINITE);
+
+    // Обновляем данные в разделяемой памяти
+    sharedState->N = N;
+    sharedState->bgColor = bgColor;
+    sharedState->markingColor = markingColor;
+
+    // Копируем данные из матрицы в плоский массив
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j)
+            sharedState->matrix[i * N + j] = stateMatrix[i][j];
+
+    // Освобождаем мьютекс
+    ReleaseMutex(hMutex);
+}
+
+// Функция для синхронизации локального состояния с разделяемой памятью
+void SyncFromSharedMemory(HWND hwnd) {
+    if (!pSharedMem) return; // Проверяем, что память инициализирована
+
+    // Получаем указатель на структуру в разделяемой памяти
+    SharedGameState* sharedState = (SharedGameState*)pSharedMem;
+
+    // Захватываем мьютекс перед чтением данных
+    WaitForSingleObject(hMutex, INFINITE);
+
+    // Обновляем локальные переменные из разделяемой памяти
+    N = sharedState->N;
+    bgColor = sharedState->bgColor;
+    markingColor = sharedState->markingColor;
+
+    // Обновляем локальную матрицу состояния
+    stateMatrix.assign(N, vector<int>(N, 0));
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j)
+            stateMatrix[i][j] = sharedState->matrix[i * N + j];
+
+    // Освобождаем мьютекс
+    ReleaseMutex(hMutex);
+
+    // Обновляем кисть фона
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Устанавливаем новую кисть фона для окна
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+
+    // Запрашиваем перерисовку окна
+    InvalidateRect(hwnd, NULL, TRUE);
+}
 
 // Функция для плавного изменения цвета сетки
-void ChangeGridColor(bool increase) {
-    // Извлекаем компоненты цвета (R, G, B)
+void ChangeGridColor(HWND hwnd, bool increase) {
+    // Получаем компоненты текущего цвета
     int r = GetRValue(markingColor);
     int g = GetGValue(markingColor);
     int b = GetBValue(markingColor);
 
-    // Изменяем компоненты цвета в зависимости от направления изменения
+    // Изменяем красную компоненту цвета
     if (increase) {
-        r = (r + markingColorChangeSpeed) % 256;  // Увеличиваем яркость красного
+        r = (r + markingColorChangeSpeed) % 256; // Увеличиваем яркость
     }
     else {
-        r = (r - markingColorChangeSpeed + 256) % 256;  // Уменьшаем яркость красного
+        r = (r - markingColorChangeSpeed + 256) % 256; // Уменьшаем яркость
     }
 
-    // Обновляем цвет сетки
+    // Устанавливаем новый цвет
     markingColor = RGB(r, g, b);
+
+    // Обновляем разделяемую память
+    UpdateSharedMemory();
+
+    // Отправляем сообщение всем окнам для обновления цветов
+    PostMessage(HWND_BROADCAST, WM_UPDATE_COLORS, 0, 0);
+
+    // Запрашиваем перерисовку текущего окна
+    InvalidateRect(hwnd, NULL, TRUE);
 }
 
 // Функция для установки случайного цвета фона
-void SetRandomBgColor() {
-    static random_device rd;  // Генератор случайных чисел
-    static mt19937 gen(rd());  // Механизм генерации случайных чисел
-    static uniform_int_distribution<int> dist(0, 255);  // Распределение для RGB (0-255)
-    bgColor = RGB(dist(gen), dist(gen), dist(gen));  // Генерация случайного цвета
+void SetRandomBgColor(HWND hwnd) {
+    // Инициализируем генератор случайных чисел
+    static random_device rd;
+    static mt19937 gen(rd());
+    static uniform_int_distribution<int> dist(0, 255);
+
+    // Генерируем случайный цвет
+    bgColor = RGB(dist(gen), dist(gen), dist(gen));
+
+    // Обновляем кисть фона
+    DeleteObject(bgBrush);
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Обновляем разделяемую память
+    UpdateSharedMemory();
+
+    // Отправляем сообщение всем окнам для обновления цветов
+    PostMessage(HWND_BROADCAST, WM_UPDATE_COLORS, 0, 0);
+
+    // Устанавливаем новую кисть фона для окна
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+
+    // Запрашиваем перерисовку окна
+    InvalidateRect(hwnd, NULL, TRUE);
 }
 
-void SaveStateMemoryMappedFiles(HWND hwnd) {
-    // Создаем или перезаписываем файл
-    HANDLE hFile = CreateFile(
-        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
-        GENERIC_READ | GENERIC_WRITE, // [DWORD dwDesiredAccess] — запрашиваемые права: чтение и запись
-        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
-        CREATE_ALWAYS,         // [DWORD dwCreationDisposition] — всегда создавать новый файл, даже если он уже есть (перезапишет)
-        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
-        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
-    );
+// Функция для сохранения конфигурации (размера поля) в файл
+void SaveConfig(int n) {
+    // Создаем или перезаписываем файл конфигурации
+    HANDLE hFile = CreateFileW(configFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
 
-    RECT rect;
-    GetWindowRect(hwnd, &rect);
-    int width = rect.right - rect.left;
-    int height = rect.bottom - rect.top;
+    DWORD written;
+    // Записываем размер поля в файл
+    WriteFile(hFile, &n, sizeof(n), &written, NULL);
 
-    // Размер данных для сохранения
-    size_t dataSize = sizeof(N) + sizeof(width) + sizeof(height) + sizeof(bgColor) + sizeof(markingColor) + (N * N * sizeof(int));
-
-    // Устанавливаем размер файла
-    SetFilePointer(
-        hFile,                 // [HANDLE hFile] — дескриптор файла
-        dataSize,              // [LONG lDistanceToMove] — на сколько байт сместить указатель файла
-        NULL,                  // [PLONG lpDistanceToMoveHigh] — NULL, т.к. используем только младшие 32 бита
-        FILE_BEGIN             // [DWORD dwMoveMethod] — сдвиг от начала файла
-    );
-
-    SetEndOfFile(hFile);       // Обрезает или расширяет файл до текущего указателя — тут мы заранее задали размер файла через SetFilePointer
-
-    // Создаем отображение файла
-    HANDLE hMap = CreateFileMapping(
-        hFile,                 // [HANDLE hFile] — дескриптор файла, с которым будет связано отображение
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpFileMappingAttributes] — NULL, отображение не наследуется
-        PAGE_READWRITE,        // [DWORD flProtect] — защита: доступ на чтение и запись
-        0,                     // [DWORD dwMaximumSizeHigh] — старшие 32 бита размера (если нужен файл > 4ГБ)
-        dataSize,              // [DWORD dwMaximumSizeLow] — младшие 32 бита размера отображения
-        NULL                   // [LPCTSTR lpName] — NULL, имя отображения не нужно (анонимное)
-    );
-
-    if (!hMap) {
-        CloseHandle(hFile);
-        return;
-    }
-
-    // Отображаем файл в память
-    char* pData = (char*)MapViewOfFile(
-        hMap,                  // [HANDLE hFileMappingObject] — дескриптор отображения, созданного через CreateFileMapping
-        FILE_MAP_WRITE,        // [DWORD dwDesiredAccess] — доступ на запись
-        0,                     // [DWORD dwFileOffsetHigh] — старшие 32 бита смещения (если нужно начать не с начала)
-        0,                     // [DWORD dwFileOffsetLow] — младшие 32 бита смещения (0 = с начала файла)
-        dataSize               // [SIZE_T dwNumberOfBytesToMap] — размер отображения, сколько байт из файла отобразить в память
-    );
-
-    if (!pData) {
-        CloseHandle(hMap);
-        CloseHandle(hFile);
-        return;
-    }
-    // Записываем данные в отображенную память
-    size_t offset = 0;
-    memcpy(pData + offset, &N, sizeof(N));
-    offset += sizeof(N);
-    memcpy(pData + offset, &width, sizeof(width));
-    offset += sizeof(width);
-    memcpy(pData + offset, &height, sizeof(height));
-    offset += sizeof(height);
-    memcpy(pData + offset, &bgColor, sizeof(bgColor));
-    offset += sizeof(bgColor);
-    memcpy(pData + offset, &markingColor, sizeof(markingColor));
-    offset += sizeof(markingColor);
-    for (int i = 0; i < N; ++i) {
-        memcpy(pData + offset, stateMatrix[i].data(), N * sizeof(int));
-        offset += N * sizeof(int);
-    }
-    // Освобождаем ресурсы
-    UnmapViewOfFile(pData);
-    CloseHandle(hMap);
+    // Закрываем файл
     CloseHandle(hFile);
 }
 
-void LoadStateMemoryMappedFiles(HWND hwnd) {
-    // Открываем файл для чтения
-    HANDLE hFile = CreateFile(
-        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
-        GENERIC_READ,          // [DWORD dwDesiredAccess] — запрашиваемые права: чтение
-        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
-        OPEN_ALWAYS,           // [DWORD dwCreationDisposition] — открывать файл если он есть, если нет - создать
-        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
-        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
-    );
-    if (hFile == INVALID_HANDLE_VALUE) return;
-    // Создаем отображение файла
-    HANDLE hMap = CreateFileMapping(
-        hFile,                 // [HANDLE hFile] — дескриптор файла, с которым будет связано отображение
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpFileMappingAttributes] — NULL, отображение не наследуется
-        PAGE_READONLY,         // [DWORD flProtect] — защита: доступ на чтение и запись
-        0,                     // [DWORD dwMaximumSizeHigh] — старшие 32 бита размера (если нужен файл > 4ГБ)
-        0,                     // [DWORD dwMaximumSizeLow] — младшие 32 бита размера отображения
-        NULL                   // [LPCTSTR lpName] — NULL, имя отображения не нужно (анонимное)
-    );
-
-    if (!hMap) {
-        CloseHandle(hFile);
+// Функция для загрузки конфигурации (размера поля) из файла
+void LoadConfig(HWND hwnd) {
+    // Открываем файл конфигурации для чтения
+    HANDLE hFile = CreateFileW(configFile, GENERIC_READ, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBox(NULL, L"Ошибка открытия файла конфигурации", L"Ошибка", MB_OK | MB_ICONERROR);
         return;
     }
-    // Отображаем файл в память
-    char* pData = (char*)MapViewOfFile(
-        hMap,                  // [HANDLE hFileMappingObject] — дескриптор отображения, созданного через CreateFileMapping
-        FILE_MAP_READ,         // [DWORD dwDesiredAccess] — доступ на запись
-        0,                     // [DWORD dwFileOffsetHigh] — старшие 32 бита смещения (если нужно начать не с начала)
-        0,                     // [DWORD dwFileOffsetLow] — младшие 32 бита смещения (0 = с начала файла)
-        0                      // [SIZE_T dwNumberOfBytesToMap] — размер отображения, сколько байт из файла отобразить в память
-    );
 
-    if (!pData) {
-        CloseHandle(hMap);
-        CloseHandle(hFile);
-        return;
-    }
-    // Читаем данные из отображенной памяти
-    size_t offset = 0;
     int savedN;
-    memcpy(&savedN, pData + offset, sizeof(savedN));
-    offset += sizeof(savedN);
-    int width = 320, height = 240; // Значения по умолчанию
-    memcpy(&width, pData + offset, sizeof(width));
-    offset += sizeof(width);
-    memcpy(&height, pData + offset, sizeof(height));
-    offset += sizeof(height);
-    memcpy(&bgColor, pData + offset, sizeof(bgColor));
-    offset += sizeof(bgColor);
-    memcpy(&markingColor, pData + offset, sizeof(markingColor));
-    offset += sizeof(markingColor);
-    // Если размер матрицы совпадает или не установлен вручную, загружаем ее
-    if (!isSizeParamSet || savedN == N) {
-        N = savedN;
-        stateMatrix.assign(N, std::vector<int>(N, 0));
-
-        for (int i = 0; i < N; ++i) {
-            memcpy(stateMatrix[i].data(), pData + offset, N * sizeof(int));
-            offset += N * sizeof(int);
-        }
-    }
-    // Освобождаем ресурсы
-    UnmapViewOfFile(pData);
-    CloseHandle(hMap);
-    CloseHandle(hFile);
-    // Удаляем старую кисть фона и создаем новую
-    DeleteObject(bgBrush);
-    bgBrush = CreateSolidBrush(bgColor);
-    // Устанавливаем новый цвет фона
-    SetClassLongPtr(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
-        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
-    );
-
-    // Меняем размер окна
-    SetWindowPos(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
-        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
-        width, height,        // [int cx, int cy] — новая ширина и высота
-        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
-    );
-
-    // Перерисовываем окно
-    InvalidateRect(
-        hwnd,      // [HWND hWnd] — дескриптор окна
-        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
-        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
-    );
-}
-
-void SaveStateFilePointers(HWND hwnd) {
-    // Создаём файловый указатель
-    FILE* file;
-    fopen_s(&file, "state.bin", "wb"); // Открываем файл для записи, прикрепляя к нему созданный ранее указатель
-
-    if (!file) return; // Если возникает какая-то ошибка при открытии, функция завершается
-
-    RECT rect;
-    GetWindowRect(hwnd, &rect); // Получаем координаты окна
-    int width = rect.right - rect.left;  // Вычисляем ширину окна
-    int height = rect.bottom - rect.top; // Вычисляем высоту окна
-
-    // Записываем в файл количество элементов N
-    fwrite(&N, sizeof(N), 1, file);
-    // Записываем ширину окна
-    fwrite(&width, sizeof(width), 1, file);
-    // Записываем высоту окна
-    fwrite(&height, sizeof(height), 1, file);
-    // Записываем цвет фона
-    fwrite(&bgColor, sizeof(bgColor), 1, file);
-    // Записываем цвет выделения
-    fwrite(&markingColor, sizeof(markingColor), 1, file);
-
-    // Записываем матрицу состояния (N строк по N элементов)
-    for (int i = 0; i < N; ++i) {
-        fwrite(stateMatrix[i].data(), N * sizeof(int), 1, file);
-    }
-
-    fclose(file); // Закрываем файл
-}
-
-void LoadStateFilePointers(HWND hwnd) {
-    // Создаём файловый указатель
-    FILE* file;
-    fopen_s(&file, "state.bin", "rb"); // Открываем файл для чтения, прикрепляя к нему созданный ранее указатель
-    if (!file) return; // Если возникает какая-то ошибка, функция завершается
-
-    int width = 320, height = 240; // Значения по умолчанию для размеров окна
-    int savedN; // Временная переменная для хранения N из файла
-
-    // Читаем количество элементов N из файла
-    fread(&savedN, sizeof(savedN), 1, file);
-    // Читаем ширину окна
-    fread(&width, sizeof(width), 1, file);
-    // Читаем высоту окна
-    fread(&height, sizeof(height), 1, file);
-    // Читаем цвет фона
-    fread(&bgColor, sizeof(bgColor), 1, file);
-    // Читаем цвет выделения
-    fread(&markingColor, sizeof(markingColor), 1, file);
-
-    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
-    if (!isSizeParamSet || savedN == N) {
-        N = savedN;
-        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
-        // Читаем матрицу состояния из файла
-        for (int i = 0; i < N; ++i) {
-            fread(stateMatrix[i].data(), N * sizeof(int), 1, file);
-        }
-    }
-
-    fclose(file); // Закрываем файл
-
-    // Удаляем старую кисть фона и создаем новую с загруженным цветом
-    DeleteObject(bgBrush);
-    bgBrush = CreateSolidBrush(bgColor);
-
-    // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
-        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
-    );
-
-    // Меняем размер окна на загруженный из файла
-    SetWindowPos(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
-        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
-        width, height,        // [int cx, int cy] — новая ширина и высота
-        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
-    );
-
-    // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(
-        hwnd,      // [HWND hWnd] — дескриптор окна
-        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
-        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
-    );
-}
-
-void SaveStateFileStreams(HWND hwnd) {
-    // Открываем поток ввода для файла состояния
-    ofstream file("state.bin", ios::binary);
-    if (!file) return; // Если возникает какая-то ошибка, функция завершается
-
-    RECT rect;
-    GetWindowRect(hwnd, &rect); // Получаем координаты окна
-    int width = rect.right - rect.left;  // Вычисляем ширину окна
-    int height = rect.bottom - rect.top; // Вычисляем высоту окна
-
-    // Записываем в файл количество элементов N
-    file.write(reinterpret_cast<char*>(&N), sizeof(N));
-    // Записываем ширину окна
-    file.write(reinterpret_cast<char*>(&width), sizeof(width));
-    // Записываем высоту окна
-    file.write(reinterpret_cast<char*>(&height), sizeof(height));
-    // Записываем цвет фона
-    file.write(reinterpret_cast<char*>(&bgColor), sizeof(bgColor));
-    // Записываем цвет выделения
-    file.write(reinterpret_cast<char*>(&markingColor), sizeof(markingColor));
-
-    // Записываем матрицу состояния (N строк по N элементов)
-    for (int i = 0; i < N; ++i) {
-        file.write(reinterpret_cast<char*>(stateMatrix[i].data()), N * sizeof(int));
-    }
-
-    file.close(); // Закрываем поток ввода для файла состояния
-}
-
-void LoadStateFileStreams(HWND hwnd) {
-    // Открываем поток вывода для файла состояния
-    ifstream file("state.bin", ios::binary);
-    if (!file) return; // Если возникает какая-то ошибка, функция завершается
-
-    int width = 320, height = 240; // Значения по умолчанию для размеров окна
-    int savedN; // Временная переменная для хранения N из файла
-
-    // Читаем количество элементов N из файла
-    file.read(reinterpret_cast<char*>(&savedN), sizeof(savedN)); 
-    // Читаем ширину окна
-    file.read(reinterpret_cast<char*>(&width), sizeof(width));
-    // Читаем высоту окна
-    file.read(reinterpret_cast<char*>(&height), sizeof(height));
-    // Читаем цвет фона
-    file.read(reinterpret_cast<char*>(&bgColor), sizeof(bgColor));
-    // Читаем цвет выделения
-    file.read(reinterpret_cast<char*>(&markingColor), sizeof(markingColor));
-
-    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
-    if (!isSizeParamSet || savedN == N) {
-        N = savedN;
-        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
-        // Читаем матрицу состояния из файла
-        for (int i = 0; i < N; ++i) {
-            file.read(reinterpret_cast<char*>(stateMatrix[i].data()), N * sizeof(int));
-        }
-    }
-
-    file.close(); // Закрываем поток вывода для файла состояния
-
-    // Удаляем старую кисть фона и создаем новую с загруженным цветом
-    DeleteObject(bgBrush);
-    bgBrush = CreateSolidBrush(bgColor);
-
-    // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
-        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
-    );
-
-    // Меняем размер окна на загруженный из файла
-    SetWindowPos(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
-        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
-        width, height,        // [int cx, int cy] — новая ширина и высота
-        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
-    );
-
-    // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(
-        hwnd,      // [HWND hWnd] — дескриптор окна
-        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
-        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
-    );
-
-}
-
-void SaveStateWinAPI(HWND hwnd) {
-    // Открываем файл для записи (создаем или перезаписываем)
-    HANDLE hFile = CreateFile(
-        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
-        GENERIC_WRITE,         // [DWORD dwDesiredAccess] — запрашиваемые права: запись
-        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
-        CREATE_ALWAYS,         // [DWORD dwCreationDisposition] — всегда создавать новый файл, даже если он уже есть (перезапишет)
-        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
-        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
-    );
-    if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
-
-    RECT rect;
-    GetWindowRect(hwnd, &rect); // Получаем координаты окна
-    int width = rect.right - rect.left;  // Вычисляем ширину окна
-    int height = rect.bottom - rect.top; // Вычисляем высоту окна
-
-    DWORD written; // Переменная для хранения количества записанных байтов
-
-    // Записываем в файл количество элементов N
-    WriteFile(hFile, &N, sizeof(N), &written, NULL);
-    // Записываем ширину окна
-    WriteFile(hFile, &width, sizeof(width), &written, NULL);
-    // Записываем высоту окна
-    WriteFile(hFile, &height, sizeof(height), &written, NULL);
-    // Записываем цвет фона
-    WriteFile(hFile, &bgColor, sizeof(bgColor), &written, NULL);
-    // Записываем цвет выделения
-    WriteFile(hFile, &markingColor, sizeof(markingColor), &written, NULL);
-
-    // Записываем матрицу состояния (N строк по N элементов)
-    for (int i = 0; i < N; ++i) {
-        WriteFile(hFile, stateMatrix[i].data(), N * sizeof(int), &written, NULL);
-    }
-
-    CloseHandle(hFile); // Закрываем файл
-}
-
-void LoadStateWinAPI(HWND hwnd) {
-    // Открываем файл для чтения
-    HANDLE hFile = CreateFile(
-        saveFile,              // [LPCTSTR lpFileName] — путь к файлу (имя файла, который открываем или создаём)
-        GENERIC_READ,          // [DWORD dwDesiredAccess] — запрашиваемые права: чтение
-        0,                     // [DWORD dwShareMode] — режим совместного доступа: 0 означает "никому не разрешать доступ"
-        NULL,                  // [LPSECURITY_ATTRIBUTES lpSecurityAttributes] — NULL значит, дескриптор не наследуется дочерними процессами
-        OPEN_ALWAYS,           // [DWORD dwCreationDisposition] — открывать файл если он есть, если нет - создать
-        FILE_ATTRIBUTE_NORMAL, // [DWORD dwFlagsAndAttributes] — обычный файл без спец. атрибутов
-        NULL                   // [HANDLE hTemplateFile] — NULL, т.к. мы не копируем атрибуты из другого файла
-    );
-    if (hFile == INVALID_HANDLE_VALUE) return; // Проверяем, удалось ли открыть файл
-
-    int width = 320, height = 240; // Значения по умолчанию для размеров окна
-    int savedN; // Временная переменная для хранения N из файла
-    DWORD read; // Переменная для хранения количества прочитанных байтов
-
-    // Читаем количество элементов N из файла
+    DWORD read;
+    // Читаем сохраненный размер поля из файла
     ReadFile(hFile, &savedN, sizeof(savedN), &read, NULL);
-    // Читаем ширину окна
-    ReadFile(hFile, &width, sizeof(width), &read, NULL);
-    // Читаем высоту окна
-    ReadFile(hFile, &height, sizeof(height), &read, NULL);
-    // Читаем цвет фона
-    ReadFile(hFile, &bgColor, sizeof(bgColor), &read, NULL);
-    // Читаем цвет выделения
-    ReadFile(hFile, &markingColor, sizeof(markingColor), &read, NULL);
 
-    // Если размер заранее не установлен или он совпадает с сохраненным, применяем его
+    // Если размер не был задан через параметры или совпадает с сохраненным
     if (!isSizeParamSet || savedN == N) {
-        N = savedN;
-        stateMatrix.assign(N, vector<int>(N, 0)); // Пересоздаем матрицу состояния
-        // Читаем матрицу состояния из файла
-        for (int i = 0; i < N; ++i) {
-            ReadFile(hFile, stateMatrix[i].data(), N * sizeof(int), &read, NULL);
-        }
+        N = savedN; // Устанавливаем сохраненный размер
     }
 
-    CloseHandle(hFile); // Закрываем файл
-
-    // Удаляем старую кисть фона и создаем новую с загруженным цветом
-    DeleteObject(bgBrush);
-    bgBrush = CreateSolidBrush(bgColor);
-
-    // Устанавливаем новый цвет фона для класса окна
-    SetClassLongPtr(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        GCLP_HBRBACKGROUND,   // [int nIndex] — устанавливаем фоновую кисть класса окна
-        (LONG_PTR)bgBrush     // [LONG_PTR dwNewLong] — передаём новую кисть
-    );
-
-    // Меняем размер окна на загруженный из файла
-    SetWindowPos(
-        hwnd,                 // [HWND hWnd] — дескриптор окна
-        NULL,                 // [HWND hWndInsertAfter] — NULL, потому что мы не меняем порядок Z
-        0, 0,                 // [int X, int Y] — координаты (игнорируются благодаря флагу SWP_NOMOVE)
-        width, height,        // [int cx, int cy] — новая ширина и высота
-        SWP_NOMOVE | SWP_NOZORDER // [UINT uFlags] — не двигать по координатам и не менять порядок окон
-    );
-
-
-    // Перерисовываем окно, чтобы применить изменения
-    InvalidateRect(
-        hwnd,      // [HWND hWnd] — дескриптор окна
-        NULL,      // [LPCRECT lpRect] — NULL значит "перерисовать всё окно"
-        TRUE       // [BOOL bErase] — TRUE: стереть фон перед перерисовкой (важно для применения нового цвета)
-    );
-
+    // Закрываем файл
+    CloseHandle(hFile);
 }
-
-void SaveState(HWND hwnd) {
-    wstring methodNames[4] = { L"отображения файлов на память", L"указателей на файлы", L"потоков ввода-вывода", L"файловых функций WinAPI"}; // Массив названий методов для вывода сообщения на экран
-    switch (saveMethod) // Запуск метода соответствующего выбранному с помощью saveMethod
-    {
-    case 0:
-        SaveStateMemoryMappedFiles(hwnd);
-        break;
-    case 1:
-        SaveStateFilePointers(hwnd);
-        break;
-    case 2:
-        SaveStateFileStreams(hwnd);
-        break;
-    case 3:
-        SaveStateWinAPI(hwnd);
-        break;
-    }
-    wstring msg = wstring(L"Состояние сохранено методом ") + methodNames[saveMethod];  // Создание финальной строки сообщения для вывода на экран
-    MessageBox(hwnd, msg.c_str(), L"Сохранение состояния", MB_OK | MB_ICONINFORMATION); // Вывод на экран окна с уведомлением о сохранении и названием метода
-}
-
-void LoadState(HWND hwnd) {
-    wstring methodNames[4] = { L"отображения файлов на память", L"указателей на файлы", L"потоков ввода-вывода", L"файловых функций WinAPI" }; // Массив названий методов для вывода сообщения на экран
-    switch (loadMethod) // Запуск метода соответствующего выбранному с помощью loadMethod
-    {
-    case 0:
-        LoadStateMemoryMappedFiles(hwnd);
-        break;
-    case 1:
-        LoadStateFilePointers(hwnd);
-        break;
-    case 2:
-        LoadStateFileStreams(hwnd);
-        break;
-    case 3:
-        LoadStateWinAPI(hwnd);
-        break;
-    }
-    wstring msg = wstring(L"Состояние загружено методом ") + methodNames[loadMethod]; // Создание финальной строки сообщения для вывода на экран
-    MessageBox(hwnd, msg.c_str(), L"Загрузка состояния", MB_OK | MB_ICONINFORMATION); // Вывод на экран окна с уведомлением о загрузке и названием метода
-}
-
-
 
 // Функция для обновления состояния игрового поля
 void updateState(HWND hwnd, int x, int y, int type) {
     RECT rect;
-    GetClientRect(GetForegroundWindow(), &rect);  // Получаем размеры клиентской области окна
-    int cellWidth = rect.right / N;  // Ширина одной ячейки
-    int cellHeight = rect.bottom / N;  // Высота одной ячейки
+    GetClientRect(hwnd, &rect); // Получаем размеры клиентской области окна
+    int cellWidth = rect.right / N; // Вычисляем ширину одной ячейки
+    int cellHeight = rect.bottom / N; // Вычисляем высоту одной ячейки
 
-    int col = x / cellWidth;  // Определяем столбец ячейки
-    int row = y / cellHeight;  // Определяем строку ячейки
+    // Определяем строку и столбец ячейки по координатам
+    int col = x / cellWidth;
+    int row = y / cellHeight;
 
-    if (row >= 0 && row < N && col >= 0 && col < N) {  // Проверяем, что ячейка в пределах поля
-        if (stateMatrix[row][col] != type) {  // Если состояние ячейки изменилось
-            stateMatrix[row][col] = type;  // Обновляем состояние ячейки (1 - крест, 2 - окружность)
+    // Проверяем, что ячейка в пределах поля
+    if (row >= 0 && row < N && col >= 0 && col < N) {
+        // Если состояние ячейки изменилось
+        if (stateMatrix[row][col] != type) {
+            stateMatrix[row][col] = type; // Обновляем состояние
 
-            RECT cellRect = {
-                col * cellWidth, row * cellHeight,
-                (col + 1) * cellWidth, (row + 1) * cellHeight
-            };  // Определяем область ячейки
+            // Обновляем разделяемую память
+            UpdateSharedMemory();
 
-            InvalidateRect(hwnd, &cellRect, TRUE);  // Перерисовываем ячейку
+            // Отправляем сообщение всем окнам для обновления состояния
+            PostMessage(HWND_BROADCAST, WM_UPDATE_GAME_STATE, 0, 0);
+
+            // Определяем область ячейки для перерисовки
+            RECT cellRect = { col * cellWidth, row * cellHeight,
+                             (col + 1) * cellWidth, (row + 1) * cellHeight };
+
+            // Запрашиваем перерисовку только этой ячейки
+            InvalidateRect(hwnd, &cellRect, TRUE);
         }
     }
 }
 
 // Функция для очистки состояния игры
-void ClearState() {
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
-            stateMatrix[i][j] = 0;  // Очищаем матрицу состояния
-    markingColor = RGB(255, 0, 0);  // Сбрасываем цвет сетки
-    DeleteObject(bgBrush);  // Удаляем старую кисть
-    bgColor = RGB(51, 129, 255); // Ставим значение фона по умолчанию
-    bgBrush = CreateSolidBrush(bgColor);  // Создаем новую кисть для фона с цветом по умолчанию
+void ClearState(HWND hwnd) {
+    // Очищаем матрицу состояния
+    stateMatrix.assign(N, vector<int>(N, 0));
+
+    // Сбрасываем цвет сетки на красный
+    markingColor = RGB(255, 0, 0);
+
+    // Обновляем кисть фона
+    DeleteObject(bgBrush);
+    bgColor = RGB(51, 129, 255); // Синий цвет по умолчанию
+    bgBrush = CreateSolidBrush(bgColor);
+
+    // Обновляем разделяемую память
+    UpdateSharedMemory();
+
+    // Отправляем сообщения всем окнам для обновления
+    PostMessage(HWND_BROADCAST, WM_UPDATE_GAME_STATE, 0, 0);
+    PostMessage(HWND_BROADCAST, WM_UPDATE_COLORS, 0, 0);
 }
 
 // Функция для рисования разметки игрового поля
 void DrawMarking(HWND hwnd, HDC hdc) {
-    if (N <= 1) return;  // Защита от некорректных значений
+    if (N <= 1) return; // Не рисуем для некорректных размеров
+
     RECT rect;
-    GetClientRect(hwnd, &rect);  // Получаем размеры клиентской области окна
+    GetClientRect(hwnd, &rect); // Получаем размеры клиентской области
+    int width = rect.right;
+    int height = rect.bottom;
+    int cellWidth = width / N; // Ширина одной ячейки
+    int cellHeight = height / N; // Высота одной ячейки
 
-    int width = rect.right;  // Ширина клиентской области
-    int height = rect.bottom;  // Высота клиентской области
-    int cellWidth = width / N;  // Ширина одной ячейки
-    int cellHeight = height / N;  // Высота одной ячейки
-
-    HPEN hPen = CreatePen(PS_SOLID, 5, markingColor);  // Создаем перо для рисования линий
-    HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);  // Выбираем перо в контекст устройства
+    // Создаем перо для рисования линий сетки
+    HPEN hPen = CreatePen(PS_SOLID, 5, markingColor);
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
 
     // Рисуем вертикальные линии
     for (int i = 1; i < N; ++i) {
         int x = i * cellWidth;
-        MoveToEx(hdc, x, 0, NULL);  // Перемещаемся к началу линии
-        LineTo(hdc, x, height);  // Рисуем линию
+        MoveToEx(hdc, x, 0, NULL);
+        LineTo(hdc, x, height);
     }
 
     // Рисуем горизонтальные линии
     for (int i = 1; i < N; ++i) {
         int y = i * cellHeight;
-        MoveToEx(hdc, 0, y, NULL);  // Перемещаемся к началу линии
-        LineTo(hdc, width, y);  // Рисуем линию
+        MoveToEx(hdc, 0, y, NULL);
+        LineTo(hdc, width, y);
     }
 
-    SelectObject(hdc, hOldPen);  // Восстанавливаем старое перо
-    DeleteObject(hPen);  // Удаляем созданное перо
+    // Восстанавливаем старое перо и удаляем созданное
+    SelectObject(hdc, hOldPen);
+    DeleteObject(hPen);
 }
 
-// Функция для рисования содержимого игрового поля (кресты и окружности)
+// Функция для рисования содержимого игрового поля (крестиков и ноликов)
 void DrawMatrix(HWND hwnd, HDC hdc) {
     RECT rect;
-    GetClientRect(hwnd, &rect);  // Получаем размеры клиентской области окна
-    int cellWidth = rect.right / N;  // Ширина одной ячейки
-    int cellHeight = rect.bottom / N;  // Высота одной ячейки
+    GetClientRect(hwnd, &rect); // Получаем размеры клиентской области
+    int cellWidth = rect.right / N; // Ширина одной ячейки
+    int cellHeight = rect.bottom / N; // Высота одной ячейки
 
-    HPEN hCrossPen = CreatePen(PS_SOLID, 5, RGB(0, 255, 0));  // Перо для крестов (зелёное)
-    HPEN hCirclePen = CreatePen(PS_SOLID, 5, RGB(255, 50, 255));  // Перо для окружностей (фиолетовое)
+    // Создаем перья для рисования крестиков и ноликов
+    HPEN hCrossPen = CreatePen(PS_SOLID, 5, RGB(0, 255, 0)); // Зеленый для крестиков
+    HPEN hCirclePen = CreatePen(PS_SOLID, 5, RGB(255, 50, 255)); // Фиолетовый для ноликов
     HPEN hOldPen;
 
+    // Перебираем все ячейки поля
     for (int row = 0; row < N; ++row) {
         for (int col = 0; col < N; ++col) {
-            int x1 = col * cellWidth;  // Левый верхний угол ячейки
-            int y1 = row * cellHeight;  // Левый верхний угол ячейки
-            int x2 = x1 + cellWidth;  // Правый нижний угол ячейки
-            int y2 = y1 + cellHeight;  // Правый нижний угол ячейки
-            int padding = min(cellWidth, cellHeight) / 4;  // Отступ для рисования фигур
+            // Координаты ячейки
+            int x1 = col * cellWidth;
+            int y1 = row * cellHeight;
+            int x2 = x1 + cellWidth;
+            int y2 = y1 + cellHeight;
 
-            if (stateMatrix[row][col] == 1) {  // Если в ячейке крест
-                hOldPen = (HPEN)SelectObject(hdc, hCrossPen);  // Выбираем перо для креста
-                MoveToEx(hdc, x1 + padding, y1 + padding, NULL);  // Рисуем первую линию креста
+            // Отступ от краев ячейки для рисования фигур
+            int padding = min(cellWidth, cellHeight) / 4;
+
+            // Если в ячейке крестик (значение 1)
+            if (stateMatrix[row][col] == 1) {
+                hOldPen = (HPEN)SelectObject(hdc, hCrossPen);
+                // Рисуем первую диагональ крестика
+                MoveToEx(hdc, x1 + padding, y1 + padding, NULL);
                 LineTo(hdc, x2 - padding, y2 - padding);
-                MoveToEx(hdc, x2 - padding, y1 + padding, NULL);  // Рисуем вторую линию креста
+                // Рисуем вторую диагональ крестика
+                MoveToEx(hdc, x2 - padding, y1 + padding, NULL);
                 LineTo(hdc, x1 + padding, y2 - padding);
-                SelectObject(hdc, hOldPen);  // Восстанавливаем старое перо
+                SelectObject(hdc, hOldPen);
             }
-            else if (stateMatrix[row][col] == 2) {  // Если в ячейке окружность
-                hOldPen = (HPEN)SelectObject(hdc, hCirclePen);  // Выбираем перо для окружности
-                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));  // Без заливки
-                Ellipse(hdc, x1 + padding, y1 + padding, x2 - padding, y2 - padding);  // Рисуем окружность
-                SelectObject(hdc, hOldBrush);  // Восстанавливаем старую кисть
-                SelectObject(hdc, hOldPen);  // Восстанавливаем старое перо
+            // Если в ячейке нолик (значение 2)
+            else if (stateMatrix[row][col] == 2) {
+                hOldPen = (HPEN)SelectObject(hdc, hCirclePen);
+                // Устанавливаем прозрачную кисть для заливки
+                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                // Рисуем окружность
+                Ellipse(hdc, x1 + padding, y1 + padding, x2 - padding, y2 - padding);
+                // Восстанавливаем кисть
+                SelectObject(hdc, hOldBrush);
+                SelectObject(hdc, hOldPen);
             }
         }
     }
-    DeleteObject(hCrossPen);  // Удаляем перо для крестов
-    DeleteObject(hCirclePen);  // Удаляем перо для окружностей
-}
 
-// Функция для инициализации состояния игры
-void initState() {
-    stateMatrix.assign(N, vector<int>(N, 0));  // Заполняем матрицу нулями
+    // Удаляем созданные перья
+    DeleteObject(hCrossPen);
+    DeleteObject(hCirclePen);
 }
 
 // Функция для обработки параметров командной строки
 void parseCmdParams(LPWSTR cmd) {
     int argc;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);  // Разбираем командную строку
+    // Разбираем командную строку на аргументы
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
-    if (argv && argc > 1) { // Проверка, что аргументы существуют (не NULL) и их 1 или более
-        int newN = _wtoi(argv[1]);  // Конвертируем первый аргумент в число
-        if (newN > 1 && newN < 21) {  // Проверяем корректность размера
-            N = newN;  // Обновляем размер игрового поля
-            isSizeParamSet = true;  // Устанавливаем флаг
-        }
-        if (argc >= 2) { // Если пользователь ввёл больше одного агрумента, то надо выбрать метод сохранения состояния в соответствии с введённым значением
-            int sM = _wtoi(argv[2]); // Конвертация в число
-            saveMethod = (0 <= sM &&  sM <= 3) ? sM : 3; // Устанавливаем новое значение
-        }
-        if (argc >= 3) { // Если пользователь ввёл больше двух агрументов, то надо выбрать метод загрузки состояния в соответствии с введённым значением
-            int lM = _wtoi(argv[3]); // Конвертация в число
-            loadMethod = (0 <= lM && lM <= 3) ? lM : 3; // Устанавливаем новое значение
+    if (argv && argc > 1) {
+        // Пытаемся преобразовать первый аргумент в число (размер поля)
+        int newN = _wtoi(argv[1]);
+        if (newN > 1 && newN < 21) { // Проверяем корректность размера
+            N = newN;
+            isSizeParamSet = true; // Устанавливаем флаг, что размер задан через параметры
         }
     }
 
-    LocalFree(argv);  // Освобождаем память, выделенную CommandLineToArgvW
-    initState();  // Инициализируем состояние игры
+    // Освобождаем память, выделенную для аргументов
+    LocalFree(argv);
 }
 
 // Основная функция программы
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int showWin) {
-    parseCmdParams(pCmdLine);  // Обрабатываем параметры командной строки
-    WNDCLASSEX wc = { 0 };  // Создаем структуру для описания класса окна
-    wc.cbSize = sizeof(WNDCLASSEX);  // Размер структуры
-    wc.lpfnWndProc = WinProc;  // Указатель на функцию обработки сообщений
-    wc.hInstance = hInstance;  // Дескриптор экземпляра приложения
-    wc.lpszClassName = L"Tic-tac-toe";  // Имя класса окна
-    wc.hbrBackground = bgBrush;  // Кисть для фона окна
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);  // Курсор по умолчанию
+    // Регистрируем пользовательские сообщения для межпроцессного взаимодействия
+    WM_UPDATE_GAME_STATE = RegisterWindowMessage(L"TicTacToe_UpdateGameState");
+    WM_UPDATE_COLORS = RegisterWindowMessage(L"TicTacToe_UpdateColors");
 
-    if (!RegisterClassEx(&wc)) {  // Регистрируем класс окна
-        return -1;  // Если регистрация не удалась, завершаем программу
+    // Проверяем успешность регистрации сообщений
+    if (WM_UPDATE_GAME_STATE == 0 || WM_UPDATE_COLORS == 0) {
+        MessageBox(NULL, L"Ошибка регистрации сообщений", L"Ошибка", MB_OK | MB_ICONERROR);
+        return -1;
     }
 
-    // Создаем окно
+    // Обрабатываем параметры командной строки
+    parseCmdParams(pCmdLine);
+
+    // Загружаем конфигурацию (размер поля) из файла
+    LoadConfig(NULL);
+
+    // Инициализируем разделяемую память
+    InitSharedMemory();
+
+    // Регистрируем класс окна
+    WNDCLASSEX wc = { 0 };
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.lpfnWndProc = WinProc; // Указатель на функцию обработки сообщений
+    wc.hInstance = hInstance; // Дескриптор экземпляра приложения
+    wc.lpszClassName = L"Tic-tac-toe"; // Имя класса окна
+    wc.hbrBackground = bgBrush; // Кисть для фона окна
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW); // Курсор по умолчанию
+
+    if (!RegisterClassEx(&wc)) {
+        return -1; // Если регистрация не удалась, завершаем программу
+    }
+
+    // Создаем главное окно приложения
     HWND hwnd = CreateWindowW(
-        L"Tic-tac-toe",  // Имя класса окна
-        L"Tic-tac-toe",  // Заголовок окна
-        WS_OVERLAPPEDWINDOW,  // Стиль окна
-        100, 100, 320, 240,  // Позиция и размеры окна
-        NULL, NULL, hInstance, NULL  // Дополнительные параметры
+        L"Tic-tac-toe", // Имя класса окна
+        L"Tic-tac-toe", // Заголовок окна
+        WS_OVERLAPPEDWINDOW, // Стиль окна
+        100, 100, 320, 240, // Позиция и размеры
+        NULL, NULL, hInstance, NULL // Дополнительные параметры
     );
 
-    if (!hwnd) return -1;  // Если окно не создалось, завершаем программу
+    if (!hwnd) return -1; // Если окно не создано, завершаем программу
 
-    ShowWindow(hwnd, showWin);  // Показываем окно
-    UpdateWindow(hwnd);  // Обновляем окно
+    // Показываем и обновляем окно
+    ShowWindow(hwnd, showWin);
+    UpdateWindow(hwnd);
 
-    // Основной цикл обработки сообщений
+    // Цикл обработки сообщений
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);  // Преобразуем сообщения
-        DispatchMessage(&msg);  // Отправляем сообщения в функцию обработки
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
 
-    return 0;  // Завершаем программу
+    // Очистка ресурсов перед выходом
+    if (pSharedMem) UnmapViewOfFile(pSharedMem);
+    if (hMapFile) CloseHandle(hMapFile);
+    if (hMutex) CloseHandle(hMutex);
+    DeleteObject(bgBrush);
+
+    return 0;
 }
 
 // Функция обработки сообщений окна
 LRESULT CALLBACK WinProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    HDC hdc;  // Контекст устройства
-    PAINTSTRUCT ps;  // Структура для рисования
+    HDC hdc;
+    PAINTSTRUCT ps;
 
-    switch (uMsg) {  // Обрабатываем сообщения
-    case WM_CREATE:  // Сообщение о создании окна
-        LoadState(hwnd);  // Загружаем состояние игры
-        return 0;
-
-    case WM_COMMAND:  // Сообщение о команде (не используется)
-        return 0;
-
-    case WM_LBUTTONDOWN:  // Сообщение о нажатии левой кнопки мыши
-        updateState(hwnd, LOWORD(lParam), HIWORD(lParam), 2);  // Обновляем состояние (окружность)
-        return 0;
-
-    case WM_RBUTTONDOWN:  // Сообщение о нажатии правой кнопки мыши
-        updateState(hwnd, LOWORD(lParam), HIWORD(lParam), 1);  // Обновляем состояние (крест)
-        return 0;
-
-    case WM_MOUSEMOVE:  // Сообщение о движении мыши (не используется)
-        return 0;
-
-    case WM_LBUTTONUP:  // Сообщение об отпускании левой кнопки мыши (не используется)
-        return 0;
-
-    case WM_SIZE:  // Сообщение об изменении размера окна
-        InvalidateRect(hwnd, NULL, TRUE);  // Запрашиваем перерисовку окна
-        return 0;
-
-    case WM_PAINT:  // Сообщение о необходимости перерисовки окна
-        hdc = BeginPaint(hwnd, &ps);  // Начинаем рисование
-        DrawMarking(hwnd, hdc);  // Рисуем разметку
-        DrawMatrix(hwnd, hdc);  // Рисуем содержимое поля
-        EndPaint(hwnd, &ps);  // Заканчиваем рисование
-        return 0;
-
-    case WM_KEYDOWN: {  // Сообщение о нажатии клавиши
-        if (wParam == VK_ESCAPE || (wParam == 'Q' && GetKeyState(VK_CONTROL) < 0)) {  // Если нажата клавиша ESC или Ctrl+Q
-            SaveState(hwnd);  // Сохраняем состояние
-            PostQuitMessage(0);  // Закрываем окно
-        }
-        if ((wParam == 'L') && (GetKeyState(VK_CONTROL) < 0)) {  // Если нажата Ctrl+L
-            ClearState();  // Очищаем состояние
-            SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);  // Обновляем цвет фона
-            InvalidateRect(hwnd, NULL, TRUE);  // Перерисовываем окно
-        }
-        if ((wParam == 'C') && (GetKeyState(VK_SHIFT) < 0)) {  // Если нажата Shift+C
-            ShellExecute(NULL, L"open", L"notepad", NULL, NULL, SW_SHOWNORMAL);  // Открываем файл состояния
-        }
-        if (wParam == VK_RETURN) {  // Если нажата клавиша Enter
-            DeleteObject(bgBrush);  // Удаляем старую кисть
-            SetRandomBgColor();  // Устанавливаем случайный цвет фона
-            bgBrush = CreateSolidBrush(bgColor);  // Создаем новую кисть
-            SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);  // Обновляем цвет фона
-            InvalidateRect(hwnd, NULL, TRUE);  // Перерисовываем окно
-        }
+    // Обработка пользовательских сообщений
+    if (uMsg == WM_UPDATE_GAME_STATE || uMsg == WM_UPDATE_COLORS) {
+        SyncFromSharedMemory(hwnd); // Синхронизируем состояние из разделяемой памяти
         return 0;
     }
-    case WM_MOUSEWHEEL: {  // Сообщение о прокрутке колеса мыши
-        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);  // Получаем направление прокрутки
 
-        if (zDelta > 0) {  // Если прокрутка вверх
-            ChangeGridColor(true);  // Увеличиваем яркость цвета сетки
-        }
-        else {  // Если прокрутка вниз
-            ChangeGridColor(false);  // Уменьшаем яркость цвета сетки
-        }
+    switch (uMsg) {
+    case WM_CREATE:
+        // При создании окна синхронизируем состояние
+        SyncFromSharedMemory(hwnd);
+        return 0;
 
-        InvalidateRect(hwnd, NULL, TRUE);  // Запрашиваем перерисовку
+    case WM_LBUTTONDOWN:
+        // Обработка клика левой кнопкой мыши (нолик)
+        updateState(hwnd, LOWORD(lParam), HIWORD(lParam), 2);
+        return 0;
+
+    case WM_RBUTTONDOWN:
+        // Обработка клика правой кнопкой мыши (крестик)
+        updateState(hwnd, LOWORD(lParam), HIWORD(lParam), 1);
+        return 0;
+
+    case WM_SIZE:
+        // При изменении размера окна запрашиваем перерисовку
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+
+    case WM_PAINT:
+        // Обработка сообщения о необходимости перерисовки
+        hdc = BeginPaint(hwnd, &ps);
+        DrawMarking(hwnd, hdc); // Рисуем разметку
+        DrawMatrix(hwnd, hdc); // Рисуем содержимое поля
+        EndPaint(hwnd, &ps);
+        return 0;
+
+    case WM_KEYDOWN:
+        // Обработка нажатий клавиш
+        if (wParam == VK_ESCAPE || (wParam == 'Q' && GetKeyState(VK_CONTROL) < 0)) {
+            // ESC или Ctrl+Q - сохраняем конфигурацию и выходим
+            SaveConfig(N);
+            PostQuitMessage(0);
+        }
+        if ((wParam == 'L') && (GetKeyState(VK_CONTROL) < 0)) {
+            // Ctrl+L - очищаем состояние
+            ClearState(hwnd);
+            SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)bgBrush);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        if ((wParam == 'C') && (GetKeyState(VK_SHIFT) < 0)) {
+            // Shift+C - открываем блокнот
+            ShellExecute(NULL, L"open", L"notepad", NULL, NULL, SW_SHOWNORMAL);
+        }
+        if (wParam == VK_RETURN) {
+            // Enter - устанавливаем случайный цвет фона
+            SetRandomBgColor(hwnd);
+        }
+        return 0;
+
+    case WM_MOUSEWHEEL: {
+        // Обработка прокрутки колеса мыши
+        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        ChangeGridColor(hwnd, zDelta > 0); // Изменяем цвет сетки
         return 0;
     }
-    case WM_DESTROY:  // Сообщение о закрытии окна
-        SaveState(hwnd);  // Сохраняем состояние
-        PostQuitMessage(0);  // Завершаем программу
+
+    case WM_DESTROY:
+        // При закрытии окна сохраняем конфигурацию и выходим
+        SaveConfig(N);
+        PostQuitMessage(0);
         return 0;
 
-    default:  // Обработка остальных сообщений
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);  // Стандартная обработка
+    default:
+        // Обработка остальных сообщений стандартным обработчиком
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
 }
